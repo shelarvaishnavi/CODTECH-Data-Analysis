@@ -1,46 +1,59 @@
-# Import necessary libraries 
 from pyspark.sql import SparkSession 
-from pyspark.sql.functions import col, sum, avg, count 
+from pyspark.sql.functions import col, sum, avg, count, regexp_replace
 
-# 1. Initialize Spark Session (Demonstrating Scalability) 
-# The .builder allows Spark to scale from a single laptop to a cluster of machines
+# 1. Initialize Spark Session
 spark = SparkSession.builder \
     .appName("BigDataRetailAnalysis") \
     .getOrCreate() 
 
 print("Spark Session Initialized Successfully!") 
 
-# 2. Load the Large Dataset 
-# Use 'inferSchema=True' to let Spark automatically detect data types
-# Ensure 'retail_data.csv' is in the same folder as this script
+# 2. Load the Dataset
 try: 
+    # Using the correct filename you have in your folder
     df = spark.read.csv("retail_data.csv", header=True, inferSchema=True) 
     print("Dataset Loaded. Total Records:", df.count()) 
 except Exception as e: 
     print("Error loading data: Ensure 'retail_data.csv' is in the folder.") 
 
-# 3. Data Cleaning (Handling Big Data challenges) 
-# Removing null values to ensure analysis accuracy 
-df_cleaned = df.dropna() 
+# --- STEP 3: Clean Prices AND Ratings ---
+from pyspark.sql.functions import expr, col, regexp_replace
 
-# 4. Big Data Processing: Insight 1 - Total Sales by Category 
-# We use .groupBy which is optimized for distributed computing 
-category_sales = df_cleaned.groupBy("Category") \
-    .agg(sum("Total_Price").alias("Total_Revenue")) \
-    .orderBy(col("Total_Revenue").desc()) 
+# 1. Clean actual_price
+df_price = df.withColumn("price_numeric", 
+    expr("try_cast(regexp_replace(actual_price, '[^0-9.]', '') AS FLOAT)"))
 
-print("--- Total Revenue by Category ---") 
-category_sales.show() 
+# 2. Clean rating (This fixes the '|' error you just got)
+df_rating = df_price.withColumn("rating_numeric", 
+    expr("try_cast(regexp_replace(rating, '[^0-9.]', '') AS FLOAT)"))
 
-# 5. Big Data Processing: Insight 2 - Average Rating by Product 
-# This demonstrates Spark's ability to aggregate over millions of rows quickly 
-product_performance = df_cleaned.groupBy("ProductID") \
-    .agg(avg("Rating").alias("Average_Rating"), count("ProductID").alias("Review_Count")) \
-    .filter(col("Review_Count") > 100) \
+# 3. Clean rating_count
+df_final = df_rating.withColumn("count_numeric", 
+    expr("try_cast(regexp_replace(rating_count, '[^0-9.]', '') AS INT)"))
+
+# Drop rows that failed any conversion to keep results accurate
+df_final = df_final.dropna(subset=["price_numeric", "rating_numeric"])
+
+print("Final Cleaned Records:", df_final.count())
+
+# 4. Processing
+category_sales = df_final.groupBy("category") \
+    .agg(sum("price_numeric").alias("Total_Revenue")) \
+    .orderBy(col("Total_Revenue").desc())
+
+category_sales.show()
+
+# --- STEP 5: Average Rating (Updated with new numeric columns) ---
+product_performance = df_final.groupBy("product_id") \
+    .agg(
+        avg("rating_numeric").alias("Average_Rating"), 
+        sum("count_numeric").alias("Total_Reviews")
+    ) \
+    .filter(col("Total_Reviews") > 5) \
     .orderBy(col("Average_Rating").desc()) 
 
-print("--- Top Rated Products (with over 100 reviews) ---") 
-product_performance.show(10) 
+print("--- Top Rated Products ---") 
+product_performance.show(10)
 
 # Stop the Spark Session 
 spark.stop()
